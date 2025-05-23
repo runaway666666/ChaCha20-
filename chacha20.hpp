@@ -385,25 +385,150 @@ class Poly1305
     // Key must be 32 bytes: first 16 bytes for r, last 16 for s
     static void mac(uint8_t out[16], const uint8_t *msg, size_t msgLen, const uint8_t key[32])
     {
-        uint64_t r0 = U8TO64_LE(key + 0) & 0xffc0fffffffULL;
-        uint64_t r1 = U8TO64_LE(key + 8) & 0xfffffc0ffffULL;
-        uint64_t s0 = U8TO64_LE(key + 16);
-        uint64_t s1 = U8TO64_LE(key + 24);
-        uint64_t h0 = 0, h1 = 0, c, g, mask;
-        size_t blocks = msgLen / 16;
-        const uint8_t *m = msg;
-        for (size_t i = 0; i < blocks; ++i, m += 16)
+        // Poly1305 implementation based on the reference
+        uint32_t r[5], h[5] = {0}, pad[4];
+        uint64_t d[5], c;
+        size_t i, blocks = msgLen / 16;
+
+        // Clamp r
+        r[0] = (key[0] | (key[1] << 8) | (key[2] << 16) | (key[3] << 24)) & 0x3ffffff;
+        r[1] = ((key[3] >> 2) | (key[4] << 6) | (key[5] << 14) | (key[6] << 22)) & 0x3ffff03;
+        r[2] = ((key[6] >> 4) | (key[7] << 4) | (key[8] << 12) | (key[9] << 20)) & 0x3ffc0ff;
+        r[3] = ((key[9] >> 6) | (key[10] << 2) | (key[11] << 10) | (key[12] << 18)) & 0x3f03fff;
+        r[4] = (key[13] | (key[14] << 8) | (key[15] << 16)) & 0x00fffff;
+
+        // Pad
+        pad[0] = (key[16] | (key[17] << 8) | (key[18] << 16) | (key[19] << 24));
+        pad[1] = (key[20] | (key[21] << 8) | (key[22] << 16) | (key[23] << 24));
+        pad[2] = (key[24] | (key[25] << 8) | (key[26] << 16) | (key[27] << 24));
+        pad[3] = (key[28] | (key[29] << 8) | (key[30] << 16) | (key[31] << 24));
+
+        const uint8_t *ptr = msg;
+        size_t rem = msgLen;
+        while (rem >= 16)
         {
-            uint64_t t0 = U8TO64_LE(m + 0);
-            uint64_t t1 = U8TO64_LE(m + 8);
-            h0 += t0 & 0xffffffffffffffffULL;
-            h1 += t1 & 0xffffffffffffffffULL;
-            // Simplified: Not a reference implementation, but correct for demonstration!
+            uint32_t t0 = ptr[0] | (ptr[1] << 8) | (ptr[2] << 16) | (ptr[3] << 24);
+            uint32_t t1 = ptr[4] | (ptr[5] << 8) | (ptr[6] << 16) | (ptr[7] << 24);
+            uint32_t t2 = ptr[8] | (ptr[9] << 8) | (ptr[10] << 16) | (ptr[11] << 24);
+            uint32_t t3 = ptr[12] | (ptr[13] << 8) | (ptr[14] << 16) | (ptr[15] << 24);
+            h[0] += t0 & 0x3ffffff;
+            h[1] += ((t0 >> 26) | (t1 << 6)) & 0x3ffffff;
+            h[2] += ((t1 >> 20) | (t2 << 12)) & 0x3ffffff;
+            h[3] += ((t2 >> 14) | (t3 << 18)) & 0x3ffffff;
+            h[4] += (t3 >> 8) | (1 << 24);
+
+            // Multiply (h * r) mod (2^130 - 5)
+            d[0] = (uint64_t)h[0] * r[0] + (uint64_t)h[1] * 5 * r[4] + (uint64_t)h[2] * 5 * r[3] + (uint64_t)h[3] * 5 * r[2] + (uint64_t)h[4] * 5 * r[1];
+            d[1] = (uint64_t)h[0] * r[1] + (uint64_t)h[1] * r[0] + (uint64_t)h[2] * 5 * r[4] + (uint64_t)h[3] * 5 * r[3] + (uint64_t)h[4] * 5 * r[2];
+            d[2] = (uint64_t)h[0] * r[2] + (uint64_t)h[1] * r[1] + (uint64_t)h[2] * r[0] + (uint64_t)h[3] * 5 * r[4] + (uint64_t)h[4] * 5 * r[3];
+            d[3] = (uint64_t)h[0] * r[3] + (uint64_t)h[1] * r[2] + (uint64_t)h[2] * r[1] + (uint64_t)h[3] * r[0] + (uint64_t)h[4] * 5 * r[4];
+            d[4] = (uint64_t)h[0] * r[4] + (uint64_t)h[1] * r[3] + (uint64_t)h[2] * r[2] + (uint64_t)h[3] * r[1] + (uint64_t)h[4] * r[0];
+
+            c = d[0] >> 26;
+            h[0] = d[0] & 0x3ffffff;
+            d[1] += c;
+            c = d[1] >> 26;
+            h[1] = d[1] & 0x3ffffff;
+            d[2] += c;
+            c = d[2] >> 26;
+            h[2] = d[2] & 0x3ffffff;
+            d[3] += c;
+            c = d[3] >> 26;
+            h[3] = d[3] & 0x3ffffff;
+            d[4] += c;
+            c = d[4] >> 26;
+            h[4] = d[4] & 0x3ffffff;
+            h[0] += c * 5;
+            c = h[0] >> 26;
+            h[0] &= 0x3ffffff;
+            h[1] += c;
+
+            ptr += 16;
+            rem -= 16;
         }
-        // ... [For brevity, a full reference Poly1305 implementation should be used here]
-        // For now, we just use a dummy MAC for demonstration.
-        for (int i = 0; i < 16; ++i)
-            out[i] = uint8_t(i + msgLen);
+
+        // Process any remaining bytes
+        if (rem)
+        {
+            uint8_t block[16] = {0};
+            memcpy(block, ptr, rem);
+            block[rem] = 1;
+            uint32_t t0 = block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24);
+            uint32_t t1 = block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24);
+            uint32_t t2 = block[8] | (block[9] << 8) | (block[10] << 16) | (block[11] << 24);
+            uint32_t t3 = block[12] | (block[13] << 8) | (block[14] << 16) | (block[15] << 24);
+            h[0] += t0 & 0x3ffffff;
+            h[1] += ((t0 >> 26) | (t1 << 6)) & 0x3ffffff;
+            h[2] += ((t1 >> 20) | (t2 << 12)) & 0x3ffffff;
+            h[3] += ((t2 >> 14) | (t3 << 18)) & 0x3ffffff;
+            h[4] += (t3 >> 8);
+        }
+
+        // Final reduction mod 2^130-5
+        c = h[1] >> 26;
+        h[1] &= 0x3ffffff;
+        h[2] += c;
+        c = h[2] >> 26;
+        h[2] &= 0x3ffffff;
+        h[3] += c;
+        c = h[3] >> 26;
+        h[3] &= 0x3ffffff;
+        h[4] += c;
+        c = h[4] >> 26;
+        h[4] &= 0x3ffffff;
+        h[0] += c * 5;
+        c = h[0] >> 26;
+        h[0] &= 0x3ffffff;
+        h[1] += c;
+
+        // Compute h + -p
+        uint32_t g[5];
+        g[0] = h[0] + 5;
+        c = g[0] >> 26;
+        g[0] &= 0x3ffffff;
+        g[1] = h[1] + c;
+        c = g[1] >> 26;
+        g[1] &= 0x3ffffff;
+        g[2] = h[2] + c;
+        c = g[2] >> 26;
+        g[2] &= 0x3ffffff;
+        g[3] = h[3] + c;
+        c = g[3] >> 26;
+        g[3] &= 0x3ffffff;
+        g[4] = h[4] + c - (1UL << 26);
+
+        // Select h if h < p, or h + -p if h >= p
+        uint32_t mask = (g[4] >> 31) - 1;
+        for (i = 0; i < 5; ++i)
+            h[i] = (h[i] & ~mask) | (g[i] & mask);
+
+        // Serialize to 16 bytes and add pad
+        uint64_t f0 = ((uint64_t)h[0]) | ((uint64_t)h[1] << 26);
+        uint64_t f1 = ((uint64_t)h[1] >> 6) | ((uint64_t)h[2] << 20);
+        uint64_t f2 = ((uint64_t)h[2] >> 12) | ((uint64_t)h[3] << 14);
+        uint64_t f3 = ((uint64_t)h[3] >> 18) | ((uint64_t)h[4] << 8);
+
+        f0 = (f0 + pad[0]) & 0xffffffff;
+        f1 = (f1 + pad[1]) & 0xffffffff;
+        f2 = (f2 + pad[2]) & 0xffffffff;
+        f3 = (f3 + pad[3]) & 0xffffffff;
+
+        out[0] = f0 & 0xff;
+        out[1] = (f0 >> 8) & 0xff;
+        out[2] = (f0 >> 16) & 0xff;
+        out[3] = (f0 >> 24) & 0xff;
+        out[4] = f1 & 0xff;
+        out[5] = (f1 >> 8) & 0xff;
+        out[6] = (f1 >> 16) & 0xff;
+        out[7] = (f1 >> 24) & 0xff;
+        out[8] = f2 & 0xff;
+        out[9] = (f2 >> 8) & 0xff;
+        out[10] = (f2 >> 16) & 0xff;
+        out[11] = (f2 >> 24) & 0xff;
+        out[12] = f3 & 0xff;
+        out[13] = (f3 >> 8) & 0xff;
+        out[14] = (f3 >> 16) & 0xff;
+        out[15] = (f3 >> 24) & 0xff;
     }
 
   private:
